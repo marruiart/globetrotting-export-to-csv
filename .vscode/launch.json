@@ -1,0 +1,16 @@
+{
+  "configurations": [
+    {
+      "name": "Deploy Cloud Function",
+      "type": "cloudcode.cloudfunctions",
+      "request": "launch",
+      "functionName": "function-export-to-csv",
+      "region": "europe-west9",
+      "gen": "GEN_2",
+      "revision": "function-export-to-csv-00003-xim",
+      "entryPoint": "export_firestore_data",
+      "runtime": "python310",
+      "testInput": ""
+    }
+  ]
+}

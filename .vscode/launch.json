@@ -7,7 +7,7 @@
       "functionName": "function-export-to-csv",
       "region": "europe-west9",
       "gen": "GEN_2",
-      "revision": "function-export-to-csv-00003-xim",
+      "revision": "function-export-to-csv-00019-fig",
       "entryPoint": "export_firestore_data",
       "runtime": "python310",
       "testInput": ""

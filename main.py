@@ -1,12 +1,13 @@
-import os
 import csv
 import codecs
 from datetime import datetime, timezone
 from firebase_functions import https_fn, options
 from flask import jsonify
+import traceback
 
 # The Firebase Admin SDK to access Cloud Firestore.
 from firebase_admin import initialize_app, firestore, storage, credentials
+import functions_framework
 
 BUCKET_NAME = "globetrotting-80e83.appspot.com"
 
@@ -78,7 +79,7 @@ def format_date(date, date_format="%Y%m%d%H%M%S"):
 
 def get_file_name(collection, date, extension):
     formatted_date = format_date(date)
-    return f"{collection}_{formatted_date}{extension}"
+    return f"{formatted_date}{extension}"
 
 
 def fetch_documents(processed_documents, collection):
@@ -165,10 +166,10 @@ def write_to_csv_file(collection, tmp_file_path, proccessed_documents):
         print(f"Data format error: {ex}")
 
 
-def upload_file_to_bucket(file_name, user_id) -> str:
+def upload_file_to_bucket(file_name, collection) -> str:
     try:
         print(f"Uploading {file_name} to bucket...")
-        blob = bucket.blob(f"csv_files/{user_id}/{file_name}")
+        blob = bucket.blob(f"{collection}/{file_name}")
         blob.upload_from_filename(file_name)
         print(f"{file_name} file uploaded successfully!")
         return blob.public_url
@@ -200,39 +201,51 @@ def get_body_data(req):
     return body_data
 
 
-def get_response(status_code=200, error_code="", message="", response=""):
+def get_response(headers, status_code=200, error_code="", message=""):
+    if status_code == 204:
+        return (message, status_code, headers)
     if status_code == 200:
-        return https_fn.Response(
-            status=status_code,
-            response=jsonify(response).data,
-        )
-    return https_fn.Response(
-        status=status_code,
-        response=jsonify(
+        return (jsonify(message).data, status_code, headers)
+    return (
+        jsonify(
             {
                 "error_code": error_code,
                 "message": message,
             }
         ).data,
+        status_code,
+        headers,
     )
 
 
-@https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["post"]))
-def export_firestore_data(req: https_fn.Request) -> https_fn.Response:
+@functions_framework.http
+def export_firestore_data(request):
     """Get the server's local date and time."""
+    print(request)
     try:
-        if req.method != "POST":
-            return https_fn.Response(
-                status=403,
-                response=jsonify(
-                    {
-                        "error_code": "FORBIDDEN",
-                        "message": f"{req.method} is not allowed.",
-                    }
-                ).data,
+        # Set CORS headers for the preflight request
+        if request.method == "OPTIONS":
+            headers = {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
+                "Access-Control-Max-Age": "3600",
+            }
+            return get_response(headers, 204)
+
+        # Set CORS headers for the main request
+        headers = {"Access-Control-Allow-Origin": "*"}
+
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return get_response(headers, 401, "UNAUTHORIZED", "Unauthorized")
+
+        if request.method != "POST":
+            return get_response(
+                headers, 403, "FORBIDDEN", f"{request.method} is not allowed."
             )
 
-        body_data = get_body_data(req)
+        body_data = get_body_data(request)
         user_id = body_data["user_id"]
         collection = body_data["collection"]
 
@@ -245,27 +258,28 @@ def export_firestore_data(req: https_fn.Request) -> https_fn.Response:
             fetch_documents(processed_documents, collection_name)
             write_to_csv_file(collection, file_name, processed_documents)
             # URL del archivo recién cargado
-            file_url = upload_file_to_bucket(file_name, user_id)
-            return get_response(response={"files_location": [file_url]})
+            file_url = upload_file_to_bucket(file_name, collection_name)
+            return get_response(headers, message={"files_location": [file_url]})
         else:
             file_url = []
             for collection_name in ("users", "destinations", "bookings"):
                 processed_documents = []
                 fetch_documents(processed_documents, collection_name)
-                write_to_csv_file(
-                    collection, file_name, processed_documents
-                )
+                write_to_csv_file(collection, file_name, processed_documents)
                 # URL del archivo recién cargado
-                file_url.append(upload_file_to_bucket(file_name, user_id))
-            return get_response(response={"files_location": file_url})
+                file_url.append(upload_file_to_bucket(file_name, collection_name))
+            return get_response(headers, message={"files_location": file_url})
         # Consulta todos los documentos en la colección de Firestore
 
     except BadRequestException as ex:
-        return get_response(ex.status_code, ex.error_code, ex.message)
+        print(traceback.print_exc())
+        return get_response(headers, ex.status_code, ex.error_code, ex.message)
     except InternalServerError as ex:
-        return get_response(ex.status_code, ex.error_code, ex.message)
-    except Exception as ex:
+        print(traceback.print_exc())
+        return get_response(headers, ex.status_code, ex.error_code, ex.message)
+    except Exception:
         print(ex)
+        print(traceback.print_exc())
         return get_response(
-            500, "INTERNAL_SERVER_ERROR", "Ups! There was an unexpected error."
+            headers, 500, "INTERNAL_SERVER_ERROR", "Ups! There was an unexpected error."
         )

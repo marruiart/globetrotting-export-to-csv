@@ -1,12 +1,10 @@
-import csv
-import codecs
 from datetime import datetime, timezone
-from firebase_functions import https_fn, options
-from flask import jsonify
 import traceback
+import pandas as pd
+from flask import jsonify
 
 # The Firebase Admin SDK to access Cloud Firestore.
-from firebase_admin import initialize_app, firestore, storage, credentials
+from firebase_admin import initialize_app, firestore, storage, credentials, auth
 import functions_framework
 
 BUCKET_NAME = "globetrotting-80e83.appspot.com"
@@ -16,26 +14,45 @@ app = initialize_app(cred, {"storageBucket": "globetrotting-80e83.appspot.com"})
 db = firestore.client()
 bucket = storage.bucket()
 
-USERS_HEADER = ["ID", "EMAIL", "NOMBRE_COMPLETO", "NICKNAME", "ROL", "CREACION"]
+USERS_HEADER = [
+    "ID",
+    "EMAIL",
+    "NOMBRE_COMPLETO",
+    "GENERO",
+    "NICKNAME",
+    "FAVORITOS",
+    "ROL",
+    "FECHA_CREACION",
+    "FECHA_ACTUALIZACION",
+]
+
 BOOKINGS_HEADER = [
     "ID",
     "INGRESO",
-    "CLIENTE",
     "ID_CLIENTE",
-    "DESTINO",
+    "ID_AGENTE",
     "ID_DESTINO",
+    "CONFIRMADA",
     "NUM_NOCHES",
     "VIAJEROS",
-    "CREACION",
+    "SALIDA",
+    "LLEGADA",
+    "FECHA_CREACION",
+    "FECHA_ACTUALIZACION",
 ]
+
 DESTINATION_HEADER = [
     "ID",
     "NOMBRE",
     "COORDENADAS",
-    "DIMENSION",
+    "PAIS",
+    "UNION_POLITICA",
+    "CONTINENTE",
+    "KEYWORDS",
     "TIPO",
     "PRECIO",
-    "CREACION",
+    "FECHA_CREACION",
+    "FECHA_ACTUALIZACION",
 ]
 
 
@@ -44,6 +61,14 @@ class BadRequestException(Exception):
         super().__init__(message)
         self.error_code = "BAD_REQUEST"
         self.status_code = 400
+        self.message = message
+
+
+class UnauthorizedException(Exception):
+    def __init__(self, message="Unauthorized"):
+        super().__init__(message)
+        self.error_code = "UNAUTHORIZED"
+        self.status_code = 401
         self.message = message
 
 
@@ -85,14 +110,58 @@ def get_file_name(collection, date, extension):
 def fetch_documents(processed_documents, collection):
     collection_ref = db.collection(collection)
     docs = collection_ref.stream()
-    processed_documents = proccess_documents(collection, docs, processed_documents)
+    processed_documents = process_documents(collection, docs, processed_documents)
 
 
-def proccess_documents(collection, documents, processed_documents):
+def verify_id_token(token: str):
+    try:
+        return auth.verify_id_token(token)
+    except auth.ExpiredIdTokenError as ex:
+        raise UnauthorizedException("The token has expired") from ex
+    except auth.RevokedIdTokenError as ex:
+        raise UnauthorizedException("The token has been revoked") from ex
+    except auth.InvalidIdTokenError as ex:
+        raise UnauthorizedException("The token is invalid") from ex
+    except auth.CertificateFetchError as ex:
+        raise UnauthorizedException(
+            "Error fetching public keys to verify token"
+        ) from ex
+    except Exception as ex:
+        raise UnauthorizedException(f"Token verification failed: {str(ex)}") from ex
+
+
+def check_user_permission(user_id: str):
+    not_authorized = "The current user is not authorized to access this resource"
+    if not user_id:
+        raise UnauthorizedException(not_authorized)
+
+    collection_ref = db.collection("users")
+    user_doc = collection_ref.document(user_id).get()
+
+    if user_doc.exists:
+        user_data = user_doc.to_dict()
+        role = user_data["role"]
+        if role == "AUTHENTICATED":
+            raise UnauthorizedException(not_authorized)
+    else:
+        raise UnauthorizedException(not_authorized)
+
+
+def process_documents(collection, documents, processed_documents):
     for doc in documents:
-        mapped_data = map_data(collection, doc.to_dict())
+        doc_dict = doc.to_dict()
+        print(doc_dict)
+        mapped_data = map_data(collection, doc_dict)
         processed_documents.append(mapped_data)
     return processed_documents
+
+
+def get_favorites(user):
+    favorites = []
+    if user.get("role") == "AUTHENTICATED":
+        for fav in user.get("favorites") or []:
+            favorites.append(fav["destination_id"])
+    return favorites
 
 
 def map_user(user):
@@ -104,66 +173,84 @@ def map_user(user):
     elif name:
         full_name = f"{name}"
     return {
-        "ID": user.get("user_id", ""),
-        "EMAIL": user.get("email", ""),
+        "ID": user.get("user_id"),
+        "EMAIL": user.get("email"),
         "NOMBRE_COMPLETO": full_name,
+        "GENERO": user.get("gender", "unknown"),
         "NICKNAME": user.get("nickname", ""),
-        "ROL": user.get("role", ""),
-        "CREACION": user.get("createdAt", None),
+        "FAVORITOS": "|".join(get_favorites(user)),
+        "ROL": user.get("role"),
+        "FECHA_CREACION": user.get("createdAt"),
+        "FECHA_ACTUALIZACION": user.get("updatedAt"),
     }
 
 
 def map_booking(booking):
     return {
-        "ID": booking.get("id", ""),
-        "INGRESO": booking.get("amount", ""),
-        "CLIENTE": booking.get("clientName", ""),
-        "ID_CLIENTE": booking.get("client_id", ""),
-        "DESTINO": booking.get("destinationName", ""),
-        "ID_DESTINO": booking.get("destination_id", ""),
+        "ID": booking.get("id"),
+        "INGRESO": booking.get("amount", 0),
+        "ID_CLIENTE": booking.get("client_id"),
+        "ID_AGENTE": booking.get("agent_id"),
+        "ID_DESTINO": booking.get("destination_id"),
+        "CONFIRMADA": booking.get("isConfirmed", False),
         "NUM_NOCHES": booking.get("nights", ""),
         "VIAJEROS": booking.get("travelers", ""),
-        "CREACION": booking.get("createdAt", None),
+        "SALIDA": booking.get("start"),
+        "LLEGADA": booking.get("end"),
+        "FECHA_CREACION": booking.get("createdAt"),
+        "FECHA_ACTUALIZACION": booking.get("updatedAt"),
     }
 
 
 def map_destination(destination):
-    lat = destination.get("coordinate", {}).get("lat", None)
-    lng = destination.get("coordinate", {}).get("lng", None)
+    lat = destination.get("coordinate", {}).get("lat")
+    lng = destination.get("coordinate", {}).get("lng")
     coordinate = None
     if lat and lng:
         coordinate = f"{lat}; {lng}"
     return {
-        "ID": destination.get("id", ""),
-        "NOMBRE": destination.get("name", ""),
+        "ID": destination.get("id"),
+        "NOMBRE": destination.get("name"),
         "COORDENADAS": coordinate,
-        "DIMENSION": destination.get("dimension", ""),
-        "TIPO": destination.get("type", ""),
-        "PRECIO": destination.get("price", ""),
-        "CREACION": destination.get("createdAt", ""),
+        "KEYWORDS": "|".join(destination.get("keywords") or []),
+        "PAIS": destination.get("country"),
+        "UNION_POLITICA": destination.get("policitalUnion"),
+        "CONTINENTE": destination.get("continent"),
+        "TIPO": destination.get("type"),
+        "PRECIO": destination.get("price"),
+        "FECHA_CREACION": destination.get("createdAt"),
+        "FECHA_ACTUALIZACION": destination.get("updatedAt"),
     }
 
 
-def write_to_csv_file(collection, tmp_file_path, proccessed_documents):
+def write_to_csv_file(collection, tmp_file_path, processed_documents):
     print("Writing to csv file...")
     try:
-        with codecs.open(tmp_file_path, "w", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(
-                csvfile,
-                fieldnames=get_header(collection),
-                delimiter=";",
-                lineterminator="\n",
+        headers = get_header(collection)
+        df = pd.DataFrame(processed_documents, columns=headers)
+
+        if "INGRESO" in df.columns:
+            df["INGRESO"] = pd.to_numeric(df["INGRESO"], errors="coerce")
+            df["INGRESO"] = df["INGRESO"].apply(
+                lambda x: f"{x:.2f}".replace(".", ",") if pd.notnull(x) else x
             )
-            writer.writeheader()
-            if proccessed_documents:
-                for doc in proccessed_documents:
-                    writer.writerow(doc)
+
+        if "PRECIO" in df.columns:
+            df["PRECIO"] = pd.to_numeric(df["PRECIO"], errors="coerce")
+            df["PRECIO"] = df["PRECIO"].apply(
+                lambda x: f"{x:.2f}".replace(".", ",") if pd.notnull(x) else x
+            )
+
+        df.to_csv(tmp_file_path, sep=";", index=False, encoding="utf-8")
     except IOError as ex:
         print(f"IO error: {ex}")
-    except csv.Error as ex:
-        print(f"CSV error: {ex}")
+        raise
     except (TypeError, ValueError) as ex:
         print(f"Data format error: {ex}")
+        raise
+    except Exception as ex:
+        print(f"Unexpected error at writing to csv file: {ex}")
+        raise
 
 
 def upload_file_to_bucket(file_name, collection) -> str:
@@ -183,17 +270,17 @@ def upload_file_to_bucket(file_name, collection) -> str:
 
 def get_body_data(req):
     body_data = req.get_json(silent=True)
-    if body_data is None:
-        raise BadRequestException("'user_id' and 'request' fields are required.")
 
-    if "user_id" not in body_data:
-        raise BadRequestException("'user_id' field is required.")
-
-    if "collection" not in body_data or body_data["collection"] not in (
-        "users",
-        "bookings",
-        "destinations",
-        "all",
+    if (
+        body_data is None
+        or "collection" not in body_data
+        or body_data["collection"]
+        not in (
+            "users",
+            "bookings",
+            "destinations",
+            "all",
+        )
     ):
         raise BadRequestException(
             "'collection' field is required or incorrect payload."
@@ -220,7 +307,7 @@ def get_response(headers, status_code=200, error_code="", message=""):
 
 @functions_framework.http
 def export_firestore_data(request):
-    """Get the server's local date and time."""
+    """Export the firestore data to a CSV file."""
     print(request)
     try:
         # Set CORS headers for the preflight request
@@ -237,18 +324,20 @@ def export_firestore_data(request):
         headers = {"Access-Control-Allow-Origin": "*"}
 
         auth_header = request.headers.get("Authorization")
+
         if not auth_header or not auth_header.startswith("Bearer "):
-            return get_response(headers, 401, "UNAUTHORIZED", "Unauthorized")
+            raise UnauthorizedException()
+        token = auth_header.split("Bearer ")[1]
+        decoded_token = verify_id_token(token)
+        check_user_permission(user_id=decoded_token.get("user_id"))
+        body_data = get_body_data(request)
 
         if request.method != "POST":
             return get_response(
                 headers, 403, "FORBIDDEN", f"{request.method} is not allowed."
             )
 
-        body_data = get_body_data(request)
-        user_id = body_data["user_id"]
         collection = body_data["collection"]
-
         # Obtén la fecha y hora actual para usarla como parte del nombre del archivo CSV
         current_date = datetime.now(timezone.utc)
         file_name = get_file_name(collection, current_date, ".csv")
@@ -271,13 +360,16 @@ def export_firestore_data(request):
             return get_response(headers, message={"files_location": file_url})
         # Consulta todos los documentos en la colección de Firestore
 
+    except UnauthorizedException as ex:
+        print(ex)
+        return get_response(headers, ex.status_code, ex.error_code, ex.message)
     except BadRequestException as ex:
-        print(traceback.print_exc())
+        print(ex)
         return get_response(headers, ex.status_code, ex.error_code, ex.message)
     except InternalServerError as ex:
-        print(traceback.print_exc())
+        print(ex)
         return get_response(headers, ex.status_code, ex.error_code, ex.message)
-    except Exception:
+    except Exception as ex:
         print(ex)
         print(traceback.print_exc())
         return get_response(

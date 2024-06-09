@@ -1,2 +1,7 @@
 firebase-admin==6.5.0
 firebase-functions==0.4.1
+pandas
+numpy
+python-dateutil
+pytz
+tzdata

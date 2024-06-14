@@ -338,7 +338,7 @@ def export_firestore_data(request):
             )
 
         collection = body_data["collection"]
-        # Obtén la fecha y hora actual para usarla como parte del nombre del archivo CSV
+        # Get the current date and time to use it as part of the CSV file name
         current_date = datetime.now(timezone.utc)
         file_name = get_file_name(collection, current_date, ".csv")
         if collection != "all":
@@ -346,7 +346,7 @@ def export_firestore_data(request):
             processed_documents = []
             fetch_documents(processed_documents, collection_name)
             write_to_csv_file(collection, file_name, processed_documents)
-            # URL del archivo recién cargado
+            # URL of the newly uploaded file
             file_url = upload_file_to_bucket(file_name, collection_name)
             return get_response(headers, message={"files_location": [file_url]})
         else:
@@ -355,10 +355,9 @@ def export_firestore_data(request):
                 processed_documents = []
                 fetch_documents(processed_documents, collection_name)
                 write_to_csv_file(collection, file_name, processed_documents)
-                # URL del archivo recién cargado
+                # URL of the newly uploaded file
                 file_url.append(upload_file_to_bucket(file_name, collection_name))
             return get_response(headers, message={"files_location": file_url})
-        # Consulta todos los documentos en la colección de Firestore
 
     except UnauthorizedException as ex:
         print(ex)
